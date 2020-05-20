@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from torch.optim import Adam, Adagrad
 from torch.optim.lr_scheduler import LambdaLR
 
-from data_utils import load_word2vec, load_tacred_dataset, save_json
+from data_utils import load_word2vec, load_tacred_dataset, save_json, save_preds
 from model import CNNForRE, to_parallel, to_fp16, save_model
 
 try:
@@ -85,7 +85,7 @@ def set_seed(args):
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-def train(args, dataset, dev_dataset, model):
+def train(args, dataset, dev_dataset, model, do_train=True):
     model.train()
     dataloader = DataLoader(dataset, shuffle=args.shuffle, batch_size=args.batch_size, num_workers = args.num_workers)
     args.total_steps = len(dataloader) * args.epoch // args.gradient_accumulation_steps
@@ -105,9 +105,12 @@ def train(args, dataset, dev_dataset, model):
 
     steps = 0
     best_score = defaultdict(lambda:-1)
-    best_preds = None
+    best_preds, best_epoch = None, None
 
     for epoch in range(1,args.epoch+1):
+        if not do_train:
+            break
+
         outputs = []
         tr_loss = []
         if epoch >= args.lr_dec_epoch:
@@ -121,7 +124,7 @@ def train(args, dataset, dev_dataset, model):
                           pos2_ids=batch["pos2_ids"].to(args.device),
                           labels=batch["label"].to(args.device))
 
-            outputs += list(zip(batch["example_id"], logit.cpu().tolist()))
+            outputs += list(zip(batch["example_id"].tolist(), logit.cpu().tolist()))
 
             if args.n_gpu > 1:
                 loss = loss.mean()
@@ -161,7 +164,11 @@ def train(args, dataset, dev_dataset, model):
 
         model.freeze = True
 
-    model.load_state_dict(best_model_param)
+    if best_preds is None:
+        best_score, best_preds = eval(args, dev_dataset, model)
+    else:
+        model.load_state_dict(best_model_param)
+
     print(f"|{'BEST DEV':<7}|{best_score['precision']:>6.2f}|{best_score['recall']:>6.2f}|{best_score['f1']:>6.2f}|")
 
     score, preds = eval(args, dataset, model)
@@ -181,7 +188,7 @@ def eval(args, dataset, model):
                          pos1_ids=batch["pos1_ids"].to(args.device),
                          pos2_ids=batch["pos2_ids"].to(args.device))
 
-            outputs += list(zip(batch["example_id"], logit.cpu().tolist()))
+            outputs += list(zip(batch["example_id"].tolist(), logit.cpu().tolist()))
 
     return dataset.evaluate(outputs)
 
@@ -211,10 +218,15 @@ def main(args=None):
     model = CNNForRE(args, embedding_vectors, pad_id=train_dataset.pad_id,
                      num_labels=train_dataset.num_labels, label_weights=label_weights)
 
+    do_train = True
+    if os.path.exists(f"{args.output}/pytorch_model.bin"):
+        model.load_state_dict(torch.load(f"{args.output}/pytorch_model.bin", map_location="cpu"))
+        do_train = False
+
     model.to(args.device)
 
     preds, scores = {}, {}
-    model, scores["train"], scores["dev"], preds["train"], preds["dev"], best_epoch = train(args, train_dataset, dev_dataset, model)
+    model, scores["train"], scores["dev"], preds["train"], preds["dev"], best_epoch = train(args, train_dataset, dev_dataset, model, do_train)
 
     test_score = None
     if args.do_eval:
@@ -224,10 +236,10 @@ def main(args=None):
     model.to("cpu")
 
     if args.output is not None:
-        os.makedirs(args.output, exist_ok=True)
+        os.makedirs(f"{args.output}/predictions", exist_ok=True)
         save_model(args.output, model)
         save_args(args.output, args)
-        save_json(f"{args.output}/preds.json", preds)
+        save_preds(f"{args.output}/predictions", preds)
         save_json(f"{args.output}/scores.json", scores)
 
     return model, scores, best_epoch

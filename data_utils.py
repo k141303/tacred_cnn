@@ -43,6 +43,14 @@ def save_json(file_path, data):
     with open(file_path, "w") as f:
         json.dump(data, f, ensure_ascii=False, indent=4, sort_keys=True, separators=(',', ': '))
 
+def save_pred(file_path, data):
+    with open(file_path, "w") as f:
+        f.write(data)
+
+def save_preds(file_dir, data):
+    for part, d in data.items():
+        save_pred(f"{file_dir}/{part}.txt", "\n".join(d))
+
 def convert_token(token):
     """ Convert PTB tokens to normal tokens """
     if (token.lower() == '-lrb-'):
@@ -135,7 +143,7 @@ class TacredDataset(Dataset):
             "pos1_ids":torch.LongTensor(pos1_ids),
             "pos2_ids":torch.LongTensor(pos2_ids),
             "label":self.label2id[example["label"]],
-            "example_id":example["guid"]
+            "example_id":example["example_id"]
         }
         return d
 
@@ -176,7 +184,7 @@ class TacredDataset(Dataset):
     def _get_answers(self, examples):
         answers = {}
         for example in examples:
-            answers[example["guid"]] = self.label2id[example["label"]]
+            answers[example["example_id"]] = self.label2id[example["label"]]
         return answers
 
     def _get_word2id(self, examples):
@@ -212,13 +220,14 @@ class TacredDataset(Dataset):
     def _create_examples(self, dataset):
         """Creates examples for the training and dev sets."""
         examples = []
-        for example in dataset:
+        for ex_id, example in enumerate(dataset):
             sentence = [convert_token(token) for token in example['token']]
             assert example['subj_start'] >= 0 and example['subj_start'] <= example['subj_end'] \
                 and example['subj_end'] < len(sentence)
             assert example['obj_start'] >= 0 and example['obj_start'] <= example['obj_end'] \
                 and example['obj_end'] < len(sentence)
             examples.append({"guid":example['id'],
+                             "example_id":ex_id,
                              "sentence":sentence,
                              "subj_span":(example['subj_start'], example['subj_end']+1), #Add 1 to span to correspond to slice of the array.
                              "obj_span":(example['obj_start'], example['obj_end']+1),
@@ -228,10 +237,11 @@ class TacredDataset(Dataset):
         return examples
 
     def evaluate(self, outputs):
+        assert len(outputs) == len(self.answers)
         outputs.sort(key=lambda x:x[0])
         example_ids, preds = list(map(list,zip(*outputs)))
         labels = [self.answers[idx] for idx in example_ids]
-        outputs = [[example_id, self.id2label[pred]] for example_id, pred in outputs]
+        outputs = [self.id2label[pred] for example_id, pred in outputs]
         return compute_f1(preds, labels), outputs
 
 def load_tacred_dataset(args, word2id=None):
